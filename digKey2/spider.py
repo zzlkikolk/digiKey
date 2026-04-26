@@ -102,7 +102,7 @@ class DigikeySpider:
         - current_page_stock: 如果直接跳转到详情页，当前页的库存
         - is_direct_detail: 是否直接跳转到详情页
         """
-        search_url = f'https://www.digikey.cn/zh/products/result?keywords={keyword}'
+        search_url = f'https://www.digikey.cn/zh/products/result?keywords={quote(keyword)}'
         
         for attempt in range(retry):
             try:
