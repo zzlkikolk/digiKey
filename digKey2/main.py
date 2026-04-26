@@ -6,7 +6,7 @@ Digikey 爬虫主入口
 from spider import DigikeySpider
 from datetime import datetime
 
-
+# 主函数
 def main():
     spider = DigikeySpider()
 
