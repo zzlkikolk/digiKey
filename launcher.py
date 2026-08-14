@@ -281,7 +281,7 @@ class LauncherApp:
             content = ""
 
         # 动态生成 key 标签 + value 输入框
-        self.prop_widgets = {}  # key -> (StringVar, widget)
+        self.prop_widgets = {}  # key -> StringVar
         if not self.current_props:
             ttk.Label(
                 self.props_frame, text="该项目无账号/参数配置文件。",
@@ -296,13 +296,28 @@ class LauncherApp:
                 row=i, column=0, sticky="w", padx=(5, 8), pady=4)
 
             var = tk.StringVar(value=value)
-            entry = ttk.Entry(self.props_frame, textvariable=var, width=50)
-            entry.grid(row=i, column=1, sticky="ew", pady=4)
-            self.props_frame.columnconfigure(1, weight=1)
 
-            # 密码字段显示为 *
-            if "password" in key.lower() or "pwd" in key.lower():
-                entry.config(show="•")
+            # 布尔开关（如 Headless）用下拉框选择 true/false
+            if "headless" in key.lower():
+                combo = ttk.Combobox(
+                    self.props_frame,
+                    textvariable=var,
+                    values=("true", "false"),
+                    state="readonly",
+                    width=47,
+                )
+                # 若当前值不是合法布尔，归一化到 true/false
+                if str(value).strip().lower() not in ("true", "false"):
+                    var.set("true")
+                combo.grid(row=i, column=1, sticky="ew", pady=4)
+            else:
+                entry = ttk.Entry(self.props_frame, textvariable=var, width=50)
+                entry.grid(row=i, column=1, sticky="ew", pady=4)
+                # 密码字段显示为 *
+                if "password" in key.lower() or "pwd" in key.lower():
+                    entry.config(show="•")
+
+            self.props_frame.columnconfigure(1, weight=1)
             self.prop_widgets[key] = var
 
     def _load_keywords(self):
