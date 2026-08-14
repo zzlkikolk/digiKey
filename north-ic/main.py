@@ -56,10 +56,16 @@ def load_config():
     if interval_ms < 0:
         interval_ms = 3000
 
+    # 是否开启无头模式（默认 true）
+    headless = config.get("DEFAULT", "north-ic.Headless", fallback="true").strip().lower() in (
+        "true", "1", "yes", "on",
+    )
+
     return {
         "UserName": config.get("DEFAULT", "north-ic.UserName"),
         "Password": config.get("DEFAULT", "north-ic.Password"),
         "SearchInterval": interval_ms,
+        "Headless": headless,
     }
 
 
@@ -519,9 +525,10 @@ def main():
     print(f"账号: {account['UserName']}")
     print(f"关键字数量: {len(keywords)}")
     print(f"搜索间隔: {account['SearchInterval']} ms")
+    print(f"无头模式: {account['Headless']}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=account["Headless"])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
