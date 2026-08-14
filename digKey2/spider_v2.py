@@ -48,13 +48,19 @@ def _show_cf_popup():
 def _is_cf_challenge(page) -> bool:
     """判断当前页面是否是 Cloudflare 验证页面（只用轻量方法，避免 content()）"""
     try:
-        title = page.title()
-        if 'Just a moment' in title:
+        # 标题特征
+        title = page.title().lower()
+        if 'just a moment' in title or 'attention required' in title:
             return True
-        if 'Attention Required' in title:
+        # CF 挑战平台 URL 特征
+        url = page.url
+        if 'cdn-cgi/challenge-platform' in url or 'challenges.cloudflare.com' in url:
             return True
-        # 通过 DOM 元素判断
-        if page.locator('#challenge-running, #challenge-form, div.cf-browser-verification').count() > 0:
+        # CF 挑战 DOM 特征
+        if page.locator(
+            '#challenge-running, #challenge-form, div.cf-browser-verification, '
+            'iframe[src*="challenges.cloudflare.com"]'
+        ).count() > 0:
             return True
     except Exception:
         return False
@@ -62,19 +68,26 @@ def _is_cf_challenge(page) -> bool:
 
 
 def _is_digikey_normal(page) -> bool:
-    """判断页面是否已经正常加载出 Digikey 内容（CF 验证已通过）"""
+    """判断页面是否已真正加载出 Digikey 正常内容（CF 验证已通过）。
+
+    仅在跳回 digikey 业务域名、且出现明确的 digikey 业务元素时才判定为正常，
+    避免把 CF 挑战的过渡页/部分渲染页误判为验证已通过。
+    """
     try:
-        # 详情页特征
+        url = page.url
+        # 必须已回到 digikey 业务域名，且不在 CF 挑战平台
+        if 'digikey' not in url:
+            return False
+        if 'cdn-cgi' in url or 'challenges.cloudflare.com' in url:
+            return False
+        # 详情页：现货标题（最可靠）
         if page.locator('[data-testid="in-stock-title"]').count() > 0:
             return True
-        # 搜索列表页特征
-        if page.locator('table tbody tr').count() > 0:
+        # 搜索/分类列表页：出现 digikey 详情页链接（CF 过渡页不会包含此类链接）
+        if page.locator('a[href*="/zh/products/detail/"]').count() > 0:
             return True
-        if page.locator('a[href*="/detail/"]').count() > 0:
-            return True
-        # URL 已经是 digikey 正常页面
-        url = page.url
-        if '/zh/products/detail/' in url or '/zh/products/result' in url:
+        # 列表页：出现产品卡片类容器
+        if page.locator('div[data-testid*="product"], [class*="product-list"]').count() > 0:
             return True
     except Exception:
         pass
@@ -218,14 +231,10 @@ class DigikeySpiderV2:
             print("  -> Cloudflare 验证失败或超时，跳过")
             return None, False
 
-        # 等待关键元素出现（比 networkidle 快得多）
-        try:
-            self.page.wait_for_selector(
-                '[data-testid="in-stock-title"], table tbody tr, a[href*="/detail/"]',
-                timeout=timeout * 1000
-            )
-        except PlaywrightTimeout:
-            pass  # 页面可能不含这些元素，忽略
+        # 再次校验：必须已回到 digikey 正常业务页面，否则视为 CF 未真正通过
+        if not _is_digikey_normal(self.page):
+            print("  -> CF 验证可能未真正通过（页面未出现 digikey 正常内容），跳过")
+            return None, False
 
         return self.page.url, True
 
