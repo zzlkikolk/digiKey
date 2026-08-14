@@ -3,7 +3,14 @@
 """
 north-ic 数据爬取工具（Playwright 版）
 功能：登录 IC交易网(ic.net.cn)，根据关键字爬取元器件数据，导出为 Excel
-使用 Playwright 无头浏览器，让页面的 JS 反爬（jbnxtdm/sEnc）在真实浏览器中自然执行
+使用 Playwright 有头浏览器，让页面的 JS 反爬（jbnxtdm/sEnc）在真实浏览器中自然执行
+
+列表解析说明：
+    每个 li.stair_tr 内包含多家供应商（div.result_supply 内多个 a.result_goCompany），
+    以及对应的多个库存数量（div.result_totalNumber）。页面通过随机 class + CSS
+    控制显示/隐藏（display:none !important），只有部分供应商和库存是可见的。
+    本工具在浏览器上下文中计算每个节点的实际 display，只保留非隐藏（可见）的
+    供应商名称与库存数量，保证与页面上看到的内容一致。
 """
 
 import os
@@ -13,6 +20,7 @@ import random
 import string
 import hashlib
 import base64
+import json
 import configparser
 from datetime import datetime
 
@@ -155,7 +163,6 @@ def login(page, account):
     match = re.search(r"\((.*)\)\s*$", text, re.S)
     if not match:
         raise Exception(f"登录响应格式异常: {text[:200]}")
-    import json
     result = json.loads(match.group(1))
     if result.get("status") != 1:
         raise Exception(f"登录失败: {result.get('error', '未知错误')}")
@@ -173,11 +180,88 @@ def login(page, account):
 
 # ======================== 抓取搜索页 ========================
 
+# 在浏览器中提取每个 li 的可见（非隐藏）数据。
+# 页面通过随机 class + CSS 控制 display，只有 display 不为 none 的供应商和库存才可见。
+_VISIBLE_ROWS_JS = r"""
+() => {
+    const isVisible = (el) => {
+        if (!el) return false;
+        const cs = getComputedStyle(el);
+        return cs.display !== 'none' && cs.visibility !== 'hidden';
+    };
+
+    const rows = document.querySelectorAll('ul#resultList li.stair_tr:not([id])');
+    const out = [];
+
+    rows.forEach((row) => {
+        // 供应商：只保留可见的 a.result_goCompany
+        const suppliers = [...row.querySelectorAll('div.result_supply a.result_goCompany')]
+            .filter(isVisible)
+            .map(a => a.textContent.trim())
+            .filter(Boolean);
+
+        // 库存数量：只保留可见的 result_totalNumber
+        const qtys = [...row.querySelectorAll('div.result_totalNumber')]
+            .filter(isVisible)
+            .map(d => d.textContent.trim())
+            .filter(Boolean);
+
+        // 型号（取第一个可见的，若都不可见则取第一个）
+        let model = '';
+        const modelLinks = [...row.querySelectorAll('div.result_id span.product_number a')].filter(isVisible);
+        if (modelLinks.length > 0) {
+            model = modelLinks[0].textContent.trim();
+        } else {
+            const modelSpan = row.querySelector('div.result_id span.product_number');
+            if (modelSpan) model = modelSpan.textContent.trim();
+        }
+
+        // 厂商 / 批号 / 封装
+        const factoryEl = row.querySelector('div.result_factory');
+        const factory = factoryEl ? (factoryEl.getAttribute('title') || factoryEl.textContent.trim()) : '';
+
+        const batchEl = row.querySelector('div.result_batchNumber');
+        const batch = batchEl ? (batchEl.getAttribute('title') || batchEl.textContent.trim()) : '';
+
+        const packageEl = row.querySelector('div.result_pakaging');
+        const package_ = packageEl ? (packageEl.getAttribute('title') || packageEl.textContent.trim()) : '';
+
+        // 仓库
+        const placeElems = [...row.querySelectorAll('div.result_kwplace div.kw_list')]
+            .map(p => p.textContent.trim()).filter(Boolean);
+        const place = placeElems.join('|');
+
+        // 说明
+        const promptElems = [...row.querySelectorAll('div.result_prompt div.result_explain')]
+            .map(p => p.textContent.trim()).filter(Boolean);
+        const prompt = promptElems.join('|');
+
+        // 日期
+        let date = '';
+        const dateHidden = row.querySelector('div.result_date input[type="hidden"]');
+        if (dateHidden && dateHidden.value) {
+            date = dateHidden.value.trim();
+        } else {
+            const dateEl = row.querySelector('div.result_date');
+            if (dateEl) date = (dateEl.getAttribute('title') || '').trim();
+        }
+
+        out.push({ suppliers, qtys, model, factory, batch, package_, place, prompt, date });
+    });
+
+    return JSON.stringify(out);
+}
+"""
+
+
 def fetch_search_page(page, keyword):
     """
-    抓取关键字的搜索页 HTML。
-    使用 Playwright 加载，等待页面 JS（含反爬验证/刷新）执行完成后获取 HTML。
-    若登录过期返回 None。
+    抓取关键字的搜索页数据。
+    - 使用 Playwright 加载页面，等待页面 JS（含反爬验证/刷新）执行完成。
+    - 若登录过期返回 None。
+    返回 (basic_html, visible_rows)：
+        basic_html   用于解析数据1（参考价/月搜索量）的 HTML
+        visible_rows 列表，每项为 {suppliers, qtys, model, ...}（已按可见性过滤）
     """
     url = f"https://www.ic.net.cn/search/{requests_quote(keyword)}.html"
 
@@ -204,7 +288,14 @@ def fetch_search_page(page, keyword):
     time.sleep(2)
 
     html = page.content()
-    return html
+    visible_rows = []
+    try:
+        raw = page.evaluate(_VISIBLE_ROWS_JS)
+        visible_rows = json.loads(raw)
+    except Exception as e:
+        print(f"  [警告] 提取可见数据失败: {e}")
+
+    return html, visible_rows
 
 
 def requests_quote(text):
@@ -238,66 +329,41 @@ def parse_basic_info(soup):
     return result
 
 
-# ======================== 数据2 解析 ========================
+# ======================== 数据2 解析（基于可见数据） ========================
 
-def parse_result_rows(soup):
+def parse_visible_rows(visible_rows):
     """
-    解析数据2：库存结果列表
-    每个 li.stair_tr 为一条库存记录（联合供货：一行含多个供应商与多个数量）
+    将浏览器提取的可见数据整理成 Excel 行。
+
+    每行 li 内只保留可见（display 非 none）的供应商和库存数量，按顺序一一对应；
+    若可见供应商与可见数量数量不一致，则取两者较小值配对，避免错位。
     返回 records 列表
     """
     records = []
 
-    # 只取标准的库存数据行（排除 icgoo_info / overstock_info / icweb_info 等推送行）
-    rows = soup.select("ul#resultList li.stair_tr:not([id])")
-    for row in rows:
-        # 供应商（可能多个）
-        suppliers = [a.text.strip() for a in row.select("div.result_supply a.result_goCompany")]
-        # 型号
-        model_elem = row.select_one("div.result_id span.product_number")
-        model = model_elem.text.strip() if model_elem else ""
-        # 厂商
-        factory_elem = row.select_one("div.result_factory")
-        factory = factory_elem.text.strip() if factory_elem else ""
-        # 批号
-        batch_elem = row.select_one("div.result_batchNumber")
-        batch = batch_elem.text.strip() if batch_elem else ""
-        # 数量（可能多个）
-        quantities = [q.text.strip() for q in row.select("div.result_totalNumber")]
-        # 封装
-        package_elem = row.select_one("div.result_pakaging")
-        package = package_elem.text.strip() if package_elem else ""
-        # 仓库
-        place_elems = [p.text.strip() for p in row.select("div.result_kwplace div.kw_list")]
-        place = "|".join(p for p in place_elems if p)
-        # 说明
-        prompt_elems = [p.text.strip() for p in row.select("div.result_prompt div.result_explain")]
-        prompt = "|".join(p for p in prompt_elems if p)
-        # 日期（优先取隐藏 input 中的完整时间）
-        date = ""
-        date_hidden = row.select_one("div.result_date input[type='hidden']")
-        if date_hidden and date_hidden.get("value"):
-            date = date_hidden.get("value").strip()
-        else:
-            date_elem = row.select_one("div.result_date")
-            if date_elem:
-                date = date_elem.get("title", "").strip()
+    for row in visible_rows:
+        suppliers = row.get("suppliers") or []
+        qtys = row.get("qtys") or []
 
-        record = {
-            "供应商": "\n".join(suppliers) if suppliers else "",
-            "型号": model,
-            "厂商": factory,
-            "批号": batch,
-            "数量": "\n".join(quantities) if quantities else "",
-            "封装": package,
-            "仓库": place,
-            "说明": prompt,
-            "日期": date,
-        }
-
-        # 至少有一条有效数据才保留
-        if any(v for v in record.values()):
-            records.append(record)
+        # 以供应商数为基准拆行，数量按索引对齐（不足则补空）
+        num = max(len(suppliers), 1)
+        for idx in range(num):
+            supplier = suppliers[idx] if idx < len(suppliers) else ""
+            quantity = qtys[idx] if idx < len(qtys) else ""
+            record = {
+                "供应商": supplier,
+                "型号": row.get("model", ""),
+                "厂商": row.get("factory", ""),
+                "批号": row.get("batch", ""),
+                "数量": quantity,
+                "封装": row.get("package_", ""),
+                "仓库": row.get("place", ""),
+                "说明": row.get("prompt", ""),
+                "日期": row.get("date", ""),
+            }
+            # 至少有一条有效数据才保留
+            if any(v for v in record.values()):
+                records.append(record)
 
     return records
 
@@ -308,17 +374,18 @@ def scrape_keyword(page, keyword):
     登录失效返回 None
     """
     print(f"[爬取中] {keyword} ...")
-    html = fetch_search_page(page, keyword)
-    if html is None:
+    fetched = fetch_search_page(page, keyword)
+    if fetched is None:
         return None
+    html, visible_rows = fetched
 
     soup = BeautifulSoup(html, "html.parser")
 
     # 数据1：参考价、月搜索量
     basic_info = parse_basic_info(soup)
 
-    # 数据2：库存结果列表
-    result_records = parse_result_rows(soup)
+    # 数据2：库存结果列表（只保留可见数据）
+    result_records = parse_visible_rows(visible_rows)
 
     # 合并：每个库存记录带上数据1
     results = []
